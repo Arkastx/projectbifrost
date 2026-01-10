@@ -58,50 +58,19 @@ const SCENARIO_NAMES = {
     12: "Yukoma Hot Springs"
 };
 
-// Stat value to status rank icon mapping
-// Icons: 00=G, 01=G+, 02=F, 03=F+, 04=E, 05=E+, 06=D, 07=D+, 08=C, 09=C+, 10=B, 11=B+, 12=A, 13=A+, 14=S, 15=S+
-// Game thresholds: G(0-99), F(100-199), E(200-299), D(300-399), C(400-499), B(500-599), A(600-799), S(800-999), SS(1000+)
+// Stat value to status rank icon mapping (label-based, same as veteran view)
 function getStatRankIcon(statValue) {
-    const val = Math.max(0, statValue);
-    let iconNum;
-    if (val < 100) {
-        // G range: 0-99
-        iconNum = val < 50 ? 0 : 1;
-    } else if (val < 200) {
-        // F range: 100-199
-        iconNum = val < 150 ? 2 : 3;
-    } else if (val < 300) {
-        // E range: 200-299
-        iconNum = val < 250 ? 4 : 5;
-    } else if (val < 400) {
-        // D range: 300-399
-        iconNum = val < 350 ? 6 : 7;
-    } else if (val < 500) {
-        // C range: 400-499
-        iconNum = val < 450 ? 8 : 9;
-    } else if (val < 600) {
-        // B range: 500-599
-        iconNum = 10;
-    } else if (val < 800) {
-        // A range: 600-799
-        iconNum = 12;
-    } else if (val < 1000) {
-        // S range: 800-999
-        iconNum = 14;
-    } else {
-        // S+ range: 1000+
-        iconNum = 15;
-    }
-    return `/assets/icons/statusrank/ui_statusrank_${String(iconNum).padStart(2, '0')}.png`;
+    const label = veteranStatRankLabel(statValue);
+    return statusRankIcon(label);
 }
 
 function updateStatRankIcons(stats) {
     const statMap = {
-        'speed': stats.speed || 0,
-        'stamina': stats.stamina || 0,
-        'power': stats.power || 0,
-        'guts': stats.guts || 0,
-        'wit': stats.wisdom || 0
+        speed: stats.speed || 0,
+        stamina: stats.stamina || 0,
+        power: stats.power || 0,
+        guts: stats.guts || 0,
+        wit: stats.wisdom || 0,
     };
     for (const [stat, value] of Object.entries(statMap)) {
         const icon = $(`rank-icon-${stat}`);
@@ -867,16 +836,11 @@ function updateSkillsTab(state) {
     $('stat-icon-guts').src = statIconMap.guts;
     $('stat-icon-wit').src = statIconMap.wit;
 
-    const statRankIndex = (value) => {
-        const val = Number(value || 0);
-        return Math.min(97, Math.floor(val / 50));
-    };
-    const rankIcon = (idx) => `/assets/icons/statusrank/ui_statusrank_${String(idx).padStart(2, '0')}.png`;
-    $('rank-speed').src = rankIcon(statRankIndex(stats.speed));
-    $('rank-stamina').src = rankIcon(statRankIndex(stats.stamina));
-    $('rank-power').src = rankIcon(statRankIndex(stats.power));
-    $('rank-guts').src = rankIcon(statRankIndex(stats.guts));
-    $('rank-wit').src = rankIcon(statRankIndex(stats.wisdom));
+    $('rank-speed').src = getStatRankIcon(stats.speed);
+    $('rank-stamina').src = getStatRankIcon(stats.stamina);
+    $('rank-power').src = getStatRankIcon(stats.power);
+    $('rank-guts').src = getStatRankIcon(stats.guts);
+    $('rank-wit').src = getStatRankIcon(stats.wisdom);
 
     const apt = data.aptitudes || {};
     const aptIconIndex = {
