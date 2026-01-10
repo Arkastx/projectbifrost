@@ -1,6 +1,7 @@
 # Project Bifrost
 
 Project Bifrost reads packets from `CarrotJuicer.dll` and turns them into tangible data you can use.
+Heavily inspired by https://github.com/qwcan/UmaLauncher.
 
 ## What does it do?
 Reads packets from `CarrotJuicer.dll` to tangible data that you can use.
