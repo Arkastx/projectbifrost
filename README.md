@@ -20,7 +20,7 @@ and get a global port of Carrot Juicer.
 2) Clone this repo, install requirements, and launch `main.py`.
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Arkastx/projectbifrost.git
 cd projectbifrost
 pip install -r requirements.txt
 python main.py
