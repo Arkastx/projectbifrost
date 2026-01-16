@@ -1,12 +1,27 @@
 """MDB lookup helpers for skills, names, and growth rates."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
 
-DB_PATH = Path(__file__).parent.parent / "data" / "master.mdb"
+_LOCAL_DB_PATH = Path(__file__).parent.parent / "data" / "master.mdb"
+_APPDATA_DB_PATHS = [
+    Path(os.path.expandvars(r"%userprofile%\AppData\LocalLow\Cygames\Umamusume\master\master.mdb")),
+    Path(os.path.expandvars(r"%userprofile%\AppData\LocalLow\Cygames\UmamusumePrettyDerby_Jpn\master\master.mdb")),
+    Path(os.path.expandvars(r"%userprofile%\AppData\LocalLow\Cygames\umamusume\master\master.mdb")),
+]
+
+
+def _resolve_db_path() -> Path:
+    if _LOCAL_DB_PATH.exists():
+        return _LOCAL_DB_PATH
+    for candidate in _APPDATA_DB_PATHS:
+        if candidate.exists():
+            return candidate
+    return _LOCAL_DB_PATH
 
 _skill_name_dict: Dict[int, str] = {}
 _skill_icon_dict: Dict[int, int] = {}
@@ -33,7 +48,7 @@ _skill_need_point_dict: Dict[int, int] = {}
 
 
 def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(_resolve_db_path())
 
 
 def _load_skill_names() -> None:
