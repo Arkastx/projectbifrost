@@ -197,7 +197,8 @@ class CarrotBlenderListener:
 
             # Extract training data if present
             self._extract_training_data(parsed)
-            self._save_state_cache()
+            if packet_type == "response":
+                self._save_state_cache()
 
             if self.on_data:
                 self.on_data(parsed, packet_type)
@@ -406,6 +407,7 @@ class CarrotBlenderListener:
         chara_info = inner.get("chara_info")
         if not isinstance(chara_info, dict):
             return
+        card_id = chara_info.get("card_id")
 
         def rank(value: int) -> str:
             rank_map = {1: "G", 2: "F", 3: "E", 4: "D", 5: "C", 6: "B", 7: "A", 8: "S"}
@@ -430,13 +432,34 @@ class CarrotBlenderListener:
         for entry in chara_info.get("skill_tips_array", []):
             group_id = entry.get("group_id")
             rarity = entry.get("rarity")
+            if group_id is not None:
+                group_id = int(group_id)
+            if rarity is not None:
+                rarity = int(rarity)
             name = mdb_utils.get_skill_hint_name(group_id, rarity) if group_id and rarity is not None else None
             icon_id = mdb_utils.get_skill_hint_icon_id(group_id, rarity) if group_id and rarity is not None else None
+            skill_id = mdb_utils.get_skill_hint_id(group_id, rarity) if group_id and rarity is not None else None
+            level = entry.get("level", 1)
+            base_cost = mdb_utils.get_skill_need_points(skill_id) if skill_id else None
+            discount_level = min(max(int(level or 0), 0), 5)
+            discount_rate = mdb_utils.get_hint_discount(skill_id, discount_level) if skill_id else None
+            discount_rate = discount_rate or 0
+            discounted_cost = None
+            if base_cost:
+                discounted_cost = int(round(base_cost * (1 - discount_rate)))
+            meta = mdb_utils.get_skill_meta(skill_id) if skill_id else None
             skill_tips.append({
                 "group_id": group_id,
                 "rarity": rarity,
                 "name": name or f"Tip {group_id}",
-                "level": entry.get("level", 1),
+                "level": level,
+                "skill_id": skill_id,
+                "need_skill_point": base_cost,
+                "discount_rate": discount_rate,
+                "discounted_skill_point": discounted_cost,
+                "skill_category": meta.get("skill_category") if meta else None,
+                "skill_rarity": meta.get("rarity") if meta else None,
+                "skill_group_id": meta.get("group_id") if meta else None,
                 "icon_url": f"https://gametora.com/images/umamusume/skill_icons/utx_ico_skill_{icon_id}.png" if icon_id else None,
             })
 
@@ -462,7 +485,6 @@ class CarrotBlenderListener:
         }
 
         # Growth rates + identity
-        card_id = chara_info.get("card_id")
         growth = mdb_utils.get_card_growth(card_id) if card_id else None
         chara_id = growth.get("chara_id") if growth else None
         chara_name = mdb_utils.get_chara_name(chara_id) if chara_id else None
@@ -483,6 +505,33 @@ class CarrotBlenderListener:
                 "guts": growth.get("growth_guts", 0),
                 "wit": growth.get("growth_wit", 0),
             }
+
+        available_skills = []
+        talent_level = chara_info.get("talent_level") or 0
+        available_set_id = mdb_utils.get_available_skill_set_id(card_id) if card_id else None
+        if available_set_id:
+            for entry in mdb_utils.get_available_skills(available_set_id):
+                skill_id = entry.get("skill_id")
+                if not skill_id:
+                    continue
+                icon_id = entry.get("icon_id")
+                need_rank = entry.get("need_rank", 0)
+                meta = mdb_utils.get_skill_meta(skill_id)
+                available_skills.append({
+                    "id": skill_id,
+                    "name": entry.get("name") or f"Skill {skill_id}",
+                    "need_rank": need_rank,
+                    "need_skill_point": entry.get("need_skill_point"),
+                    "skill_category": meta.get("skill_category") if meta else None,
+                    "skill_rarity": meta.get("rarity") if meta else None,
+                    "skill_group_id": meta.get("group_id") if meta else None,
+                    "unlocked": talent_level >= need_rank,
+                    "icon_url": (
+                        f"https://gametora.com/images/umamusume/skill_icons/utx_ico_skill_{icon_id}.png"
+                        if icon_id
+                        else None
+                    ),
+                })
 
         # Supporters with bond values
         eval_dict = {e.get("training_partner_id"): e.get("evaluation", 0)
@@ -525,6 +574,7 @@ class CarrotBlenderListener:
             "growth_rates": growth_rates,
             "skills": skills,
             "skill_tips": skill_tips,
+            "available_skills": available_skills,
             "conditions": conditions,
         }
         game_state.supporters = supporters

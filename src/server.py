@@ -11,9 +11,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from .models import game_state
+from .models import game_state, GameState
 from . import veteran_utils, mdb_utils, window_utils
-from .config import VETERAN_SELECTION_PATH, load_config, save_config
+from .config import VETERAN_SELECTION_PATH, load_config, save_config, STATE_CACHE_PATH
 
 app = FastAPI(title="Project Bifrost", version="0.1.0")
 
@@ -120,6 +120,18 @@ async def set_always_on_top(payload: dict):
     ok, message = window_utils.set_always_on_top(enabled, title)
     return {"ok": ok, "message": message}
 
+
+@app.post("/api/state-reset")
+async def reset_state():
+    """Clear cached state and reset in-memory state."""
+    try:
+        if STATE_CACHE_PATH.exists():
+            STATE_CACHE_PATH.unlink()
+    except Exception as e:
+        logger.error(f"Failed to delete state cache: {e}")
+        return {"ok": False, "message": "Failed to delete state cache"}
+    game_state.__dict__.update(GameState().__dict__)
+    return {"ok": True}
 
 
 
@@ -290,10 +302,3 @@ async def broadcast_state():
             dead.add(ws)
 
     connected_clients.difference_update(dead)
-
-
-async def state_broadcaster():
-    """Background task to broadcast state periodically."""
-    while True:
-        await broadcast_state()
-        await asyncio.sleep(0.5)  # 2 updates per second

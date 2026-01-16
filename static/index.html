@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/css/app.css">
+    <link rel="stylesheet" href="/static/css/app.css?v=20260125">
 </head>
 <body>
     <div class="container">
@@ -409,7 +409,7 @@
                     </div>
                 </div>
                 <div class="skills-section">
-                    <h3>Skill Hints</h3>
+                    <h3 id="skills-available-title">Available Skills (0 SP)</h3>
                     <div class="skills-list" id="skills-tips">
                         <span class="skills-empty">No tips available</span>
                     </div>
@@ -423,6 +423,67 @@
                     <div class="skills-list" id="skills-conditions">
                         <span class="skills-empty">Nothing of note</span>
                     </div>
+                </div>
+            </div>
+            <div class="card ui-layout-item optimizer-card" data-ui-id="stats-optimizer-card">
+                <h2>Optimizer</h2>
+                <div class="settings-row">
+                    <span class="settings-label">Race Preset</span>
+                    <select class="settings-select" id="stats-preset-select">
+                        <option value="">Loading presets...</option>
+                    </select>
+                </div>
+                <div class="settings-row">
+                    <span class="settings-label">Running Style</span>
+                    <select class="settings-select" id="stats-style-select">
+                        <option value="auto">Auto (from game)</option>
+                        <option value="Front">Front</option>
+                        <option value="Pace">Pace</option>
+                        <option value="Late">Late</option>
+                        <option value="End">End</option>
+                    </select>
+                </div>
+                <div class="settings-row optimizer-targets">
+                    <label class="optimizer-target">
+                        <span>Survival Target %</span>
+                        <input type="number" id="optimizer-target-survival" value="50" min="0" max="100" step="1">
+                    </label>
+                    <label class="optimizer-target">
+                        <span>Spurt Target %</span>
+                        <input type="number" id="optimizer-target-spurt" value="50" min="0" max="100" step="1">
+                    </label>
+                    <label class="optimizer-target">
+                        <span>Final Leg Target %</span>
+                        <input type="number" id="optimizer-target-finalleg" value="0" min="0" max="100" step="1">
+                    </label>
+                </div>
+                <div class="settings-row">
+                    <button class="filters-button" id="stats-open-umalator">Check in Umalator</button>
+                </div>
+                <div class="settings-row">
+                    <button class="filters-button" id="stats-umalator-check">Run Compare Check</button>
+                </div>
+                <div class="settings-row">
+                    <div class="umalator-check-results" id="stats-umalator-results">
+                        <div class="umalator-check-line">Selected Skills Win Rate: --</div>
+                        <div class="umalator-check-line">Current Build Win Rate: --</div>
+                        <div class="umalator-check-line">Draw Rate: --</div>
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <button class="filters-button" id="optimizer-generate-builds">Generate Builds</button>
+                </div>
+                <div class="settings-row">
+                    <span class="settings-label">Builds</span>
+                    <select class="settings-select" id="optimizer-build-select">
+                        <option value="">No builds</option>
+                    </select>
+                </div>
+                <div class="settings-row">
+                    <div class="optimizer-build-summary" id="optimizer-build-summary">No build selected</div>
+                </div>
+                <div class="settings-row">
+                    <button class="filters-button" id="stats-clear-state">Delete Last State</button>
                 </div>
             </div>
         </div><!-- Tab: Race -->
@@ -753,20 +814,6 @@
                         <option value="monospace">Monospace</option>
                     </select>
                 </div>
-                <div class="settings-row">
-                    <span class="settings-label">Theme</span>
-                    <select class="settings-select" id="setting-theme" disabled>
-                        <option value="dark">Dark (Default)</option>
-                        <option value="light">Light (Coming Soon)</option>
-                    </select>
-                </div>
-                <div class="settings-row">
-                    <span class="settings-label">Compact Mode</span>
-                    <select class="settings-select" id="setting-compact" disabled>
-                        <option value="off">Off (Default)</option>
-                        <option value="on">On (Coming Soon)</option>
-                    </select>
-                </div>
                 <div class="settings-subtitle">Suggested Training (Calculator)</div>
                 <div class="settings-row">
                     <span class="settings-label">Calculator</span>
@@ -882,7 +929,7 @@
         </div>
     </div>
 
-    <script src="/static/js/app-core.js"></script>
-    <script src="/static/js/app-init.js"></script>
+    <script src="/static/js/app-core.js?v=20260130"></script>
+    <script src="/static/js/app-init.js?v=20260123"></script>
 </body>
 </html>

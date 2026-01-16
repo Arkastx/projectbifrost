@@ -3,6 +3,11 @@ let ws = null;
 let reconnectTimer = null;
 let lastRawData = null;
 let lastState = null;
+let statsUmalatorFrame = null;
+let statsUmalatorCheckId = 0;
+let umalatorCourseData = null;
+let optimizerBuilds = [];
+let optimizerBuildStatus = '';
 
 // Command IDs for training types
 const COMMAND_IDS = {
@@ -200,6 +205,41 @@ $('veteran-error-close')?.addEventListener('click', () => {
 });
 $('veteran-open-umalator')?.addEventListener('click', () => {
     openVeteranUmalator();
+});
+$('stats-open-umalator')?.addEventListener('click', () => {
+    openStatsUmalator();
+});
+$('stats-umalator-check')?.addEventListener('click', () => {
+    runStatsUmalatorCheck();
+});
+$('stats-style-select')?.addEventListener('change', (event) => {
+    selectedStatsStyle = event.currentTarget?.value || 'auto';
+});
+$('optimizer-generate-builds')?.addEventListener('click', () => {
+    generateOptimizerBuilds();
+});
+$('optimizer-build-select')?.addEventListener('change', (event) => {
+    const idx = Number(event.currentTarget?.value ?? -1);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= optimizerBuilds.length) {
+        updateOptimizerBuildSummary(null);
+        return;
+    }
+    applyOptimizerBuild(optimizerBuilds[idx]);
+});
+['optimizer-target-survival', 'optimizer-target-spurt', 'optimizer-target-finalleg'].forEach((id) => {
+    $(id)?.addEventListener('change', () => {
+        updateOptimizerBuildSummary(null);
+    });
+});
+$('stats-clear-state')?.addEventListener('click', async () => {
+    try {
+        await fetch('/api/state-reset', { method: 'POST' });
+        const res = await fetch('/api/state');
+        const data = await res.json();
+        updateUI(data);
+    } catch (e) {
+        // ignore
+    }
 });
 
 $('toggle-objectives')?.addEventListener('change', () => {
@@ -795,7 +835,8 @@ function updateSupporters(state) {
 
 function updateSkillsTab(state) {
     const data = state.skills_tab || {};
-    if (!Object.keys(data).length) return;
+    // Only skip if we have neither skills_tab data nor training stats
+    if (!Object.keys(data).length && !state.training?.stats) return;
 
     const portrait = $('skills-portrait');
     portrait.src = data.portrait_url || 'https://umapyoi.net/missing_chara.png';
@@ -919,32 +960,240 @@ function updateSkillsTab(state) {
         owned.appendChild(empty);
     }
 
+    const availableTitle = $('skills-available-title');
+    const fallbackSp = state.raw_data?.data?.chara_info?.skill_point;
+    const baseSkillPoints = Number(stats.skill_pts ?? fallbackSp ?? 0);
+    const updateAvailableTitle = () => {
+        if (!availableTitle) return;
+        let selectedTotal = 0;
+        for (const skillId of selectedAvailableSkills) {
+            const cost = availableSkillCosts.get(skillId);
+            if (Number.isFinite(cost)) selectedTotal += cost;
+        }
+        const remaining = baseSkillPoints - selectedTotal;
+        if (remaining >= 0) {
+            availableTitle.textContent = `Available Skills (${remaining.toLocaleString()} SP)`;
+        } else {
+            availableTitle.textContent = `Available Skills (NEED ${Math.abs(remaining).toLocaleString()} POINTS)`;
+        }
+    };
+
     const tips = $('skills-tips');
     tips.innerHTML = '';
-    if (data.skill_tips && data.skill_tips.length) {
-        for (const tip of data.skill_tips) {
+
+    const hintMap = new Map();
+    for (const tip of (data.skill_tips || [])) {
+        const skillId = tip.skill_id ?? null;
+        if (!skillId) continue;
+        hintMap.set(skillId, {
+            name: tip.name,
+            level: tip.level ?? 0,
+            base_cost: tip.need_skill_point ?? null,
+            discounted_cost: tip.discounted_skill_point ?? null,
+            icon_url: tip.icon_url,
+            skill_category: tip.skill_category ?? null,
+            group_id: tip.skill_group_id ?? tip.group_id ?? null,
+            rarity: tip.skill_rarity ?? null,
+        });
+    }
+
+    const availableMap = new Map();
+    for (const skill of (data.available_skills || [])) {
+        const id = skill.id ?? skill.skill_id ?? null;
+        if (!id) continue;
+        availableMap.set(id, {
+            id,
+            name: skill.name,
+            need_rank: skill.need_rank ?? 0,
+            base_cost: skill.need_skill_point ?? null,
+            unlocked: skill.unlocked,
+            icon_url: skill.icon_url,
+            skill_category: skill.skill_category ?? null,
+            group_id: skill.skill_group_id ?? null,
+            rarity: skill.skill_rarity ?? null,
+            hint_level: 0,
+            hint_cost: null,
+        });
+    }
+    for (const [skillId, hint] of hintMap.entries()) {
+        const existing = availableMap.get(skillId);
+        if (existing) {
+            existing.hint_level = Math.max(existing.hint_level, hint.level ?? 0);
+            existing.hint_cost = hint.discounted_cost ?? null;
+            if (!existing.icon_url && hint.icon_url) {
+                existing.icon_url = hint.icon_url;
+            }
+            if (existing.skill_category == null && hint.skill_category != null) {
+                existing.skill_category = hint.skill_category;
+            }
+            if (existing.group_id == null && hint.group_id != null) {
+                existing.group_id = hint.group_id;
+            }
+            if (existing.rarity == null && hint.rarity != null) {
+                existing.rarity = hint.rarity;
+            }
+        } else {
+            availableMap.set(skillId, {
+                id: skillId,
+                name: hint.name || `Skill ${skillId}`,
+                need_rank: 0,
+                base_cost: hint.base_cost ?? null,
+                unlocked: true,
+                icon_url: hint.icon_url,
+                skill_category: hint.skill_category ?? null,
+                group_id: hint.group_id ?? null,
+                rarity: hint.rarity ?? null,
+                hint_level: hint.level ?? 0,
+                hint_cost: hint.discounted_cost ?? null,
+            });
+        }
+    }
+
+    const groupMap = new Map();
+    for (const item of availableMap.values()) {
+        if (!item.group_id) continue;
+        if (!groupMap.has(item.group_id)) groupMap.set(item.group_id, []);
+        groupMap.get(item.group_id).push(item);
+    }
+    const findGroupPair = (item) => {
+        if (!item?.group_id) return {};
+        const group = groupMap.get(item.group_id) || [];
+        return {
+            white: group.find(entry => entry.rarity === 1),
+            gold: group.find(entry => entry.rarity === 2),
+        };
+    };
+
+    const computeSkillCost = (item) => {
+        const baseCost = Number.isFinite(item.hint_cost) ? item.hint_cost : item.base_cost;
+        if (!Number.isFinite(baseCost)) return null;
+        if (item.rarity === 2 && item.group_id && groupMap.has(item.group_id)) {
+            const white = groupMap.get(item.group_id).find(entry => entry.rarity === 1);
+            if (white && !selectedAvailableSkills.has(white.id)) {
+                const whiteCost = Number.isFinite(white.hint_cost) ? white.hint_cost : white.base_cost;
+                if (Number.isFinite(whiteCost)) {
+                    return baseCost + whiteCost;
+                }
+            }
+        }
+        return baseCost;
+    };
+
+    availableSkillMeta = new Map();
+    for (const item of availableMap.values()) {
+        if (item.id) {
+            availableSkillMeta.set(item.id, {
+                group_id: item.group_id ?? null,
+                rarity: item.rarity ?? null,
+            });
+        }
+    }
+
+    const availableItems = Array.from(availableMap.values()).sort((a, b) => {
+        const aIsUnique = a.skill_category === 5;
+        const bIsUnique = b.skill_category === 5;
+        if (aIsUnique !== bIsUnique) return aIsUnique ? -1 : 1;
+        const aIsGreen = a.skill_category === 0;
+        const bIsGreen = b.skill_category === 0;
+        if (aIsGreen !== bIsGreen) return aIsGreen ? -1 : 1;
+        const aGroup = a.group_id ?? 0;
+        const bGroup = b.group_id ?? 0;
+        if (aGroup !== bGroup) return aGroup - bGroup;
+        const aRarity = a.rarity ?? 0;
+        const bRarity = b.rarity ?? 0;
+        if (aRarity !== bRarity) return bRarity - aRarity;
+        const rankDiff = (a.need_rank ?? 0) - (b.need_rank ?? 0);
+        if (rankDiff !== 0) return rankDiff;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+
+    availableSkillCosts = new Map();
+    for (const item of availableItems) {
+        const cost = computeSkillCost(item);
+        if (item.id && Number.isFinite(cost)) {
+            availableSkillCosts.set(item.id, cost);
+        }
+    }
+    for (const key of Array.from(selectedAvailableSkills)) {
+        if (!availableSkillCosts.has(key)) selectedAvailableSkills.delete(key);
+    }
+    updateAvailableTitle();
+
+    if (availableItems.length) {
+        for (const tip of availableItems) {
             const item = document.createElement('div');
             item.className = 'skill-item';
-            const img = document.createElement('img');
-            img.className = 'skill-icon';
-            img.src = tip.icon_url || '';
-            img.alt = tip.name || 'Tip';
+            if (tip.unlocked === false) {
+                item.classList.add('locked');
+            }
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'skill-check';
+            const costValue = computeSkillCost(tip);
+            checkbox.disabled = !Number.isFinite(costValue);
+            if (tip.id && selectedAvailableSkills.has(tip.id)) {
+                checkbox.checked = true;
+            }
+            checkbox.addEventListener('change', () => {
+                if (!tip.id) return;
+                const pair = findGroupPair(tip);
+                if (checkbox.checked) {
+                    selectedAvailableSkills.add(tip.id);
+                    if (tip.rarity === 2 && pair.white?.id) {
+                        selectedAvailableSkills.add(pair.white.id);
+                    }
+                } else {
+                    selectedAvailableSkills.delete(tip.id);
+                    if (tip.rarity === 1 && pair.gold?.id && selectedAvailableSkills.has(pair.gold.id)) {
+                        selectedAvailableSkills.delete(pair.gold.id);
+                    }
+                }
+                updateSkillsTab(lastState);
+            });
+            item.appendChild(checkbox);
+            if (tip.icon_url) {
+                const img = document.createElement('img');
+                img.className = 'skill-icon';
+                img.src = tip.icon_url;
+                img.alt = tip.name || 'Skill';
+                img.onerror = () => {
+                    img.onerror = null;
+                    img.remove();
+                };
+                item.appendChild(img);
+            }
+            const info = document.createElement('div');
+            info.className = 'skill-info';
             const text = document.createElement('div');
             text.className = 'skill-text';
-            text.textContent = `${tip.name} HINT Lv ${tip.level}`;
-            const hint = document.createElement('img');
-            hint.className = 'skill-hint-icon';
-            hint.src = '/assets/icons/hint.png';
-            hint.alt = 'Hint';
-            item.appendChild(img);
-            item.appendChild(text);
-            item.appendChild(hint);
+            text.textContent = tip.name || 'Skill';
+            const meta = document.createElement('span');
+            meta.className = 'skill-meta';
+            const hintLevel = tip.hint_level ?? 0;
+            if (Number.isFinite(costValue)) {
+                meta.textContent = `${costValue} SP | Hint Lv ${hintLevel}`;
+            } else {
+                meta.textContent = `Hint Lv ${hintLevel}`;
+            }
+            if (tip.unlocked === false) {
+                meta.classList.add('locked');
+            }
+            info.appendChild(text);
+            info.appendChild(meta);
+            item.appendChild(info);
+            if (hintLevel > 0) {
+                const hint = document.createElement('img');
+                hint.className = 'skill-hint-icon';
+                hint.src = '/assets/icons/hint.png';
+                hint.alt = 'Hint';
+                item.appendChild(hint);
+            }
             tips.appendChild(item);
         }
     } else {
         const empty = document.createElement('span');
         empty.className = 'skills-empty';
-        empty.textContent = 'No tips available';
+        empty.textContent = 'No available skills';
         tips.appendChild(empty);
     }
 
@@ -952,6 +1201,7 @@ function updateSkillsTab(state) {
     if (rawJson) {
         const compactSkills = (data.skills || []).map(({ icon_url, ...rest }) => rest);
         const compactHints = (data.skill_tips || []).map(({ icon_url, ...rest }) => rest);
+        const compactAvailable = (data.available_skills || []).map(({ icon_url, ...rest }) => rest);
         rawJson.textContent = JSON.stringify({
             chara: {
                 id: data.chara_id ?? null,
@@ -970,6 +1220,7 @@ function updateSkillsTab(state) {
             aptitudes: data.aptitudes || {},
             skills: compactSkills,
             skill_hints: compactHints,
+            available_skills: compactAvailable,
         }, null, 2);
     }
 
@@ -1135,9 +1386,682 @@ function surfaceLabelFromGround(ground) {
     return Number(ground) === 2 ? 'Dirt' : 'Turf';
 }
 
+function findStatsDefaultPreset() {
+    if (!umalatorPresets.length) return null;
+    const pickByName = (pattern) => umalatorPresets.find(p => (p.name || '').toLowerCase().includes(pattern));
+    return pickByName('sagittarius') || pickByName('champions meeting') || umalatorPresets[0];
+}
+
+function getOptimizerTargets() {
+    const read = (id, fallback) => {
+        const value = Number($(id)?.value);
+        return Number.isFinite(value) ? Math.min(Math.max(value, 0), 100) : fallback;
+    };
+    return {
+        survival: read('optimizer-target-survival', 50),
+        spurt: read('optimizer-target-spurt', 50),
+        finalLeg: read('optimizer-target-finalleg', 0),
+    };
+}
+
+function formatRate(value) {
+    if (!Number.isFinite(value)) return '--';
+    return `${(value * 100).toFixed(1)}%`;
+}
+
+function getBaseSkillPoints() {
+    if (!lastState) return 0;
+    const stats = lastState.training?.stats || {};
+    const fallback = lastState.raw_data?.data?.chara_info?.skill_point;
+    const value = Number(stats.skill_pts ?? fallback ?? 0);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function normalizeSkillSet(skillIds) {
+    const final = new Set(skillIds);
+    const groupMap = new Map();
+    for (const id of final) {
+        const meta = availableSkillMeta.get(id);
+        if (!meta?.group_id) continue;
+        const existing = groupMap.get(meta.group_id);
+        if (!existing || (meta.rarity ?? 0) > (existing.rarity ?? 0)) {
+            groupMap.set(meta.group_id, { id, rarity: meta.rarity ?? 0 });
+        }
+    }
+    for (const [groupId, top] of groupMap.entries()) {
+        for (const id of Array.from(final)) {
+            const meta = availableSkillMeta.get(id);
+            if (!meta?.group_id || meta.group_id !== groupId) continue;
+            if (id !== top.id && (meta.rarity ?? 0) < (top.rarity ?? 0)) {
+                final.delete(id);
+            }
+        }
+    }
+    return Array.from(final);
+}
+
+function buildCurrentUmaForUmalator(context = {}) {
+    if (!lastState) return null;
+    const skillsTab = lastState.skills_tab || {};
+    const stats = lastState.training?.stats || {};
+    const aptitudes = skillsTab.aptitudes || {};
+    const runningStyle = (selectedStatsStyle && selectedStatsStyle !== 'auto')
+        ? selectedStatsStyle
+        : (skillsTab.running_style || 'Pace');
+    const styleMap = {
+        Front: { strategy: 'Nige', label: 'Front' },
+        Pace: { strategy: 'Senkou', label: 'Pace' },
+        Late: { strategy: 'Sasi', label: 'Late' },
+        End: { strategy: 'Oikomi', label: 'End' },
+    };
+    const style = styleMap[runningStyle] || styleMap.Pace;
+    const distanceType = context.distanceType || null;
+    const surfaceLabel = context.surfaceLabel || null;
+    return {
+        outfitId: skillsTab.card_id ? String(skillsTab.card_id) : '',
+        speed: stats.speed ?? 0,
+        stamina: stats.stamina ?? 0,
+        power: stats.power ?? 0,
+        guts: stats.guts ?? 0,
+        wisdom: stats.wisdom ?? 0,
+        strategy: style.strategy,
+        distanceAptitude: distanceType ? (aptitudes.distance?.[distanceType] || 'A') : 'A',
+        surfaceAptitude: surfaceLabel ? (aptitudes.track?.[surfaceLabel] || 'A') : 'A',
+        strategyAptitude: aptitudes.style?.[style.label] || 'A',
+        skills: (skillsTab.skills || []).map(s => s.id ?? s.skill_id).filter(Boolean),
+    };
+}
+
+async function buildStatsUmalatorPayload() {
+    if (!lastState) return null;
+    if (!selectedStatsPreset && umalatorPresets.length) {
+        selectedStatsPreset = findStatsDefaultPreset() || umalatorPresets[0];
+    }
+    const preset = selectedStatsPreset;
+    const courseId = preset?.courseId || null;
+    let courseInfo = null;
+    if (courseId) {
+        try {
+            const res = await fetch(`/api/course-set/${courseId}`);
+            courseInfo = await res.json();
+        } catch (e) {
+            courseInfo = null;
+        }
+    }
+    const distanceMeters = courseInfo?.distance_m ?? preset?.distance_m ?? null;
+    const distanceType = distanceTypeFromMeters(distanceMeters);
+    const surfaceLabel = courseInfo?.ground
+        ? surfaceLabelFromGround(courseInfo.ground)
+        : (preset?.is_dirt === true ? 'Dirt' : preset?.is_dirt === false ? 'Turf' : null);
+    const context = { distanceType, surfaceLabel };
+    const uma1 = buildCurrentUmaForUmalator(context);
+    if (!uma1) return null;
+    const selectedSkillIds = (() => {
+        const selected = new Set(Array.from(selectedAvailableSkills || []).filter(Boolean));
+        const groupSelected = new Map();
+        for (const id of selected) {
+            const meta = availableSkillMeta.get(id);
+            if (!meta?.group_id) continue;
+            const existing = groupSelected.get(meta.group_id);
+            if (!existing || (meta.rarity ?? 0) > (existing.rarity ?? 0)) {
+                groupSelected.set(meta.group_id, { id, rarity: meta.rarity ?? 0 });
+            }
+        }
+        for (const [groupId, top] of groupSelected.entries()) {
+            if (top.rarity === 2) {
+                for (const [id, meta] of availableSkillMeta.entries()) {
+                    if (meta.group_id === groupId && meta.rarity === 1) {
+                        selected.delete(id);
+                    }
+                }
+            }
+        }
+        return Array.from(selected);
+    })();
+    const uma2 = {
+        ...uma1,
+        skills: (() => {
+            const merged = new Set([...(uma1.skills || []), ...selectedSkillIds]);
+            for (const id of selectedSkillIds) {
+                const meta = availableSkillMeta.get(id);
+                if (meta?.rarity === 2 && meta.group_id) {
+                    for (const [candidateId, candidateMeta] of availableSkillMeta.entries()) {
+                        if (candidateMeta.group_id === meta.group_id && candidateMeta.rarity === 1) {
+                            merged.delete(candidateId);
+                        }
+                    }
+                }
+            }
+            return Array.from(merged);
+        })(),
+    };
+
+    const payload = courseId ? {
+        courseId,
+        nsamples: 1000,
+        seed: 0,
+        usePosKeep: false,
+        useIntChecks: false,
+        racedef: {
+            mood: lastState.training?.stats?.motivation ?? 3,
+            ground: preset?.ground ?? 1,
+            groundCondition: preset?.ground ?? 1,
+            weather: preset?.weather ?? 1,
+            season: preset?.season ?? 1,
+            time: preset?.time ?? 2,
+            grade: 100,
+            popularity: 1,
+            skillId: '',
+            orderRange: null,
+            numUmas: 2,
+        },
+        uma1,
+        uma2,
+    } : { uma1, uma2 };
+    return { payload, uma1, uma2 };
+}
+
+async function openStatsUmalator() {
+    const data = await buildStatsUmalatorPayload();
+    if (!data) return;
+    const { payload } = data;
+    const hash = await encodeUmalatorState(payload);
+    const baseUrl = 'https://kachi-dev.github.io/uma-tools/umalator-global/';
+    if (!hash) {
+        window.open(baseUrl, '_blank');
+        return;
+    }
+    window.open(`${baseUrl}#${hash}`, '_blank');
+}
+
+function ensureStatsUmalatorFrame() {
+    if (statsUmalatorFrame) return statsUmalatorFrame;
+    const frame = document.createElement('iframe');
+    frame.className = 'umalator-hidden-frame';
+    frame.setAttribute('aria-hidden', 'true');
+    frame.tabIndex = -1;
+    document.body.appendChild(frame);
+    statsUmalatorFrame = frame;
+    return frame;
+}
+
+function updateStatsUmalatorResults(values, { loading = false } = {}) {
+    const container = $('stats-umalator-results');
+    if (!container) return;
+    container.classList.toggle('loading', loading);
+    const lines = container.querySelectorAll('.umalator-check-line');
+    const withSkills = values?.withSkills ?? '--';
+    const base = values?.base ?? '--';
+    const draw = values?.draw ?? '--';
+    if (lines[0]) lines[0].textContent = `Selected Skills Win Rate: ${withSkills}`;
+    if (lines[1]) lines[1].textContent = `Current Build Win Rate: ${base}`;
+    if (lines[2]) lines[2].textContent = `Draw Rate: ${draw}`;
+}
+
+async function loadUmalatorCourseData() {
+    if (umalatorCourseData) return umalatorCourseData;
+    try {
+        const res = await fetch('/static/umalator/course_data.json');
+        umalatorCourseData = await res.json();
+    } catch (e) {
+        umalatorCourseData = null;
+    }
+    return umalatorCourseData;
+}
+
+async function getUmalatorCourse(courseId) {
+    if (!courseId) return null;
+    const data = await loadUmalatorCourseData();
+    if (!data) return null;
+    return data[String(courseId)] || null;
+}
+
+function summarizeCompareResults(results) {
+    if (!results || !results.length) return null;
+    let baseWins = 0;
+    let skillWins = 0;
+    let draws = 0;
+    // Umalator compare results: negative = uma1 faster, positive = uma2 faster.
+    for (const value of results) {
+        if (value > 0) {
+            skillWins += 1;
+        } else if (value < 0) {
+            baseWins += 1;
+        } else {
+            draws += 1;
+        }
+    }
+    const total = results.length;
+    const formatRate = (count) => `${((count / total) * 100).toFixed(1)}%`;
+    return {
+        withSkills: formatRate(skillWins),
+        base: formatRate(baseWins),
+        draw: formatRate(draws),
+    };
+}
+
+function extractCompareMean(results) {
+    if (!results || !results.length) return 0;
+    return results.reduce((sum, value) => sum + value, 0) / results.length;
+}
+
+async function runUmalatorCompare({ payload, course, uma2Skills, nsamples = 400 }) {
+    const uma2 = {
+        ...payload.uma1,
+        skills: normalizeSkillSet([...(payload.uma1.skills || []), ...(uma2Skills || [])]),
+    };
+    const worker = new Worker('/static/umalator/simulator.worker.js');
+    const compareResult = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), 30000);
+        worker.onmessage = (event) => {
+            if (event.data?.type !== 'compare') return;
+            const result = event.data?.results || null;
+            const resultCount = result?.results?.length || 0;
+            if (resultCount >= nsamples) {
+                clearTimeout(timer);
+                finish(result);
+            }
+        };
+        worker.onerror = () => finish(null);
+        worker.postMessage({
+            msg: 'compare',
+            data: {
+                nsamples,
+                course,
+                racedef: payload.racedef,
+                uma1: payload.uma1,
+                uma2,
+                options: {
+                    seed: payload.seed || 0,
+                    usePosKeep: !!payload.usePosKeep,
+                    useIntChecks: !!payload.useIntChecks,
+                },
+            },
+        });
+    });
+    worker.terminate();
+    return compareResult;
+}
+
+async function runUmalatorChart({ payload, course, skills }) {
+    if (!skills.length) return new Map();
+    const worker = new Worker('/static/umalator/simulator.worker.js');
+    const results = await new Promise((resolve) => {
+        let lastResult = null;
+        let bestResult = null;
+        let bestCount = 0;
+        const timer = setTimeout(() => resolve(bestResult || lastResult), 15000);
+        worker.onmessage = (event) => {
+            if (event.data?.type !== 'chart') return;
+            lastResult = event.data?.results || lastResult;
+            let currentCount = 0;
+            if (lastResult && typeof lastResult.size === 'number') {
+                currentCount = lastResult.size;
+            } else if (lastResult && typeof lastResult === 'object') {
+                currentCount = Object.keys(lastResult).length;
+            }
+            if (currentCount > bestCount) {
+                bestCount = currentCount;
+                bestResult = lastResult;
+            }
+            const anyValue = lastResult?.values?.().next?.()?.value;
+            const sampleSize = anyValue?.results?.length || 0;
+            if (sampleSize >= 200 && currentCount > 0) {
+                clearTimeout(timer);
+                resolve(lastResult);
+            }
+        };
+        worker.onerror = () => resolve(bestResult || lastResult);
+        worker.postMessage({
+            msg: 'chart',
+            data: {
+                skills,
+                course,
+                racedef: payload.racedef,
+                uma: payload.uma1,
+                options: {
+                    seed: payload.seed || 0,
+                    usePosKeep: !!payload.usePosKeep,
+                    useIntChecks: false,
+                },
+            },
+        });
+    });
+    worker.terminate();
+    return results;
+}
+
+async function runUmalatorSkillMeta(skillIds) {
+    if (!skillIds.length) return {};
+    const worker = new Worker('/static/umalator/simulator.worker.js');
+    const results = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value || {});
+        };
+        const timer = setTimeout(() => finish({}), 10000);
+        worker.onmessage = (event) => {
+            if (event.data?.type !== 'skillmeta') return;
+            clearTimeout(timer);
+            finish(event.data?.results || {});
+        };
+        worker.onerror = () => finish({});
+        worker.postMessage({
+            msg: 'skillmeta',
+            data: { skills: skillIds },
+        });
+    });
+    worker.terminate();
+    return results;
+}
+
+function chartResultsToMap(results) {
+    const map = new Map();
+    if (!results) return map;
+    if (typeof results.forEach === 'function') {
+        results.forEach((value, key) => {
+            map.set(String(key), value?.mean ?? 0);
+        });
+        return map;
+    }
+    for (const [key, value] of Object.entries(results)) {
+        map.set(String(key), value?.mean ?? 0);
+    }
+    return map;
+}
+
+function getChartMeta(results) {
+    if (!results) return { size: 0, sampleSize: 0 };
+    let size = 0;
+    if (typeof results.size === 'number') {
+        size = results.size;
+    } else if (typeof results === 'object') {
+        size = Object.keys(results).length;
+    }
+    const anyValue = results?.values?.().next?.()?.value;
+    const sampleSize = anyValue?.results?.length || 0;
+    return { size, sampleSize };
+}
+
+function updateOptimizerBuildSummary(build) {
+    const summary = $('optimizer-build-summary');
+    if (!summary) return;
+    if (!build) {
+        summary.textContent = optimizerBuildStatus || 'No build selected';
+        return;
+    }
+    const extra = (build.nonRecoveryCount != null && build.recoveryCount != null)
+        ? ` | Non-Recovery ${build.nonRecoveryCount} | Recovery ${build.recoveryCount}`
+        : '';
+    summary.textContent = `SP ${build.cost} | Mean ${build.mean.toFixed(2)} | Survival ${formatRate(build.metrics?.survival ?? null)} | Spurt ${formatRate(build.metrics?.spurt ?? null)} | Final Leg ${formatRate(build.metrics?.finalLeg ?? null)}${extra}`;
+}
+
+function updateOptimizerBuildSelect() {
+    const select = $('optimizer-build-select');
+    if (!select) return;
+    select.innerHTML = '';
+    if (!optimizerBuilds.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No builds';
+        select.appendChild(option);
+        return;
+    }
+    optimizerBuilds.forEach((build, idx) => {
+        const option = document.createElement('option');
+        option.value = String(idx);
+        option.textContent = build.name;
+        select.appendChild(option);
+    });
+    select.value = '0';
+    applyOptimizerBuild(optimizerBuilds[0]);
+}
+
+function applyOptimizerBuild(build) {
+    if (!build) return;
+    selectedAvailableSkills = new Set(build.skills);
+    updateSkillsTab(lastState);
+    updateOptimizerBuildSummary(build);
+}
+
+async function generateOptimizerBuilds() {
+    if (!lastState) return;
+    const data = await buildStatsUmalatorPayload();
+    if (!data?.payload?.courseId) return;
+    const { payload } = data;
+    const course = await getUmalatorCourse(payload.courseId);
+    if (!course) return;
+
+    const basePoints = getBaseSkillPoints();
+    const targets = getOptimizerTargets();
+    optimizerBuildStatus = 'Generating builds...';
+    updateOptimizerBuildSummary(null);
+
+    const availableIds = Array.from(availableSkillCosts.keys());
+    if (!availableIds.length) {
+        optimizerBuildStatus = 'No available skills to build from (skill list empty).';
+        updateOptimizerBuildSummary(null);
+        return;
+    }
+
+    const skillMeta = await runUmalatorSkillMeta(availableIds);
+    const recoveryIds = availableIds.filter(id => skillMeta[id]?.isRecovery);
+    const nonRecoveryIds = availableIds.filter(id => !skillMeta[id]?.isRecovery);
+
+    const chartResults = await runUmalatorChart({ payload, course, skills: nonRecoveryIds });
+    const chartMeans = chartResultsToMap(chartResults);
+    if (!chartMeans.size && nonRecoveryIds.length) {
+        optimizerBuildStatus = 'Chart data empty; running per-skill compare fallback...';
+        updateOptimizerBuildSummary(null);
+        for (const id of nonRecoveryIds.slice(0, 30)) {
+            const compareResult = await runUmalatorCompare({
+                payload,
+                course,
+                uma2Skills: [id],
+                nsamples: 150,
+            });
+            if (!compareResult) continue;
+            chartMeans.set(id, extractCompareMean(compareResult.results || []));
+        }
+    }
+
+    const ignoredSkills = new Set(['200271', '200272']);
+    const nonRecoveryCandidates = nonRecoveryIds
+        .filter(id => !ignoredSkills.has(id))
+        .map(id => ({
+            id,
+            cost: availableSkillCosts.get(id) || 0,
+            mean: chartMeans.get(id) || 0,
+        }))
+        .filter(item => item.mean > 0 && item.cost > 0)
+        .sort((a, b) => b.mean - a.mean);
+    if (!nonRecoveryCandidates.length) {
+        optimizerBuildStatus = `No positive chart skills found. Recovery-only builds (skills: ${availableIds.length}, recovery: ${recoveryIds.length}).`;
+    }
+
+    const recoveryCandidates = recoveryIds
+        .map(id => ({ id, cost: availableSkillCosts.get(id) || 0 }))
+        .filter(item => item.cost > 0)
+        .sort((a, b) => a.cost - b.cost)
+        .slice(0, 10);
+
+    const combos = [[]];
+    for (const item of recoveryCandidates) {
+        const snapshot = combos.slice();
+        snapshot.forEach((combo) => {
+            if (combo.length >= 3) return;
+            combos.push([...combo, item]);
+        });
+    }
+    const recoveryCombos = combos
+        .map(combo => ({
+            ids: combo.map(item => item.id),
+            cost: combo.reduce((sum, item) => sum + item.cost, 0),
+        }))
+        .filter(combo => combo.cost <= basePoints)
+        .slice(0, 12);
+
+    const evaluatedRecovery = [];
+    for (const combo of recoveryCombos) {
+        const compareResult = await runUmalatorCompare({
+            payload,
+            course,
+            uma2Skills: combo.ids,
+            nsamples: 300,
+        });
+        if (!compareResult) continue;
+        evaluatedRecovery.push({
+            ...combo,
+            metrics: compareResult.metrics || {},
+        });
+    }
+
+    const meetsTargets = (metrics) => {
+        const survival = (metrics?.survival ?? 0) * 100;
+        const spurt = (metrics?.spurt ?? 0) * 100;
+        const finalLeg = (metrics?.finalLeg ?? 0) * 100;
+        return survival >= targets.survival && spurt >= targets.spurt && finalLeg >= targets.finalLeg;
+    };
+
+    let baseCombos = evaluatedRecovery.filter(entry => meetsTargets(entry.metrics));
+    if (!baseCombos.length) {
+        baseCombos = evaluatedRecovery.sort((a, b) => {
+            const aSurv = a.metrics?.survival ?? 0;
+            const bSurv = b.metrics?.survival ?? 0;
+            if (aSurv !== bSurv) return bSurv - aSurv;
+            const aSpurt = a.metrics?.spurt ?? 0;
+            const bSpurt = b.metrics?.spurt ?? 0;
+            return bSpurt - aSpurt;
+        }).slice(0, 3);
+    }
+
+    const builds = [];
+    const baseSkillSet = new Set(payload.uma1.skills || []);
+    for (const combo of baseCombos) {
+        let remaining = basePoints - combo.cost;
+        const skills = [...combo.ids];
+        for (const candidate of nonRecoveryCandidates) {
+            if (candidate.cost <= remaining) {
+                skills.push(candidate.id);
+                remaining -= candidate.cost;
+            }
+        }
+        const normalized = normalizeSkillSet(skills);
+        const buildCost = normalized.reduce((sum, id) => sum + (availableSkillCosts.get(id) || 0), 0);
+        if (buildCost > basePoints) continue;
+        const compareResult = await runUmalatorCompare({
+            payload,
+            course,
+            uma2Skills: normalized,
+            nsamples: 500,
+        });
+        if (!compareResult) continue;
+        const mean = extractCompareMean(compareResult.results || []);
+        const addedSkills = normalized.filter((id) => !baseSkillSet.has(id));
+        const recoveryCount = addedSkills.filter((id) => skillMeta[id]?.isRecovery).length;
+        const nonRecoveryCount = addedSkills.length - recoveryCount;
+        builds.push({
+            name: `Build ${builds.length + 1}`,
+            skills: normalized,
+            cost: buildCost,
+            mean,
+            metrics: compareResult.metrics || {},
+            recoveryCount,
+            nonRecoveryCount,
+        });
+        if (builds.length >= 8) break;
+    }
+
+    optimizerBuilds = builds
+        .sort((a, b) => b.mean - a.mean)
+        .slice(0, 5)
+        .map((build, idx) => ({ ...build, name: `Build ${idx + 1}` }));
+
+    optimizerBuildStatus = optimizerBuilds.length ? '' : 'No viable builds found.';
+    updateOptimizerBuildSelect();
+    updateOptimizerBuildSummary(optimizerBuilds[0] || null);
+}
+
+async function runStatsUmalatorCheck() {
+    const data = await buildStatsUmalatorPayload();
+    if (!data) return;
+    const { payload } = data;
+    if (!payload?.courseId) {
+        updateStatsUmalatorResults({ withSkills: '--', base: '--', draw: '--' }, { loading: false });
+        return;
+    }
+    const course = await getUmalatorCourse(payload.courseId);
+    if (!course) {
+        updateStatsUmalatorResults({ withSkills: '--', base: '--', draw: '--' }, { loading: false });
+        return;
+    }
+
+    const checkId = ++statsUmalatorCheckId;
+    updateStatsUmalatorResults({ withSkills: 'Running...', base: 'Running...', draw: 'Running...' }, { loading: true });
+
+    const worker = new Worker('/static/umalator/simulator.worker.js');
+    const nsamples = payload.nsamples || 1000;
+    const compareResult = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+        };
+        const timer = setTimeout(() => finish(null), 30000);
+        worker.onmessage = (event) => {
+            if (checkId !== statsUmalatorCheckId) return;
+            if (event.data?.type !== 'compare') return;
+            const result = event.data?.results || null;
+            const resultCount = result?.results?.length || 0;
+            if (resultCount >= nsamples) {
+                clearTimeout(timer);
+                finish(result);
+            }
+        };
+        worker.onerror = () => finish(null);
+        worker.postMessage({
+            msg: 'compare',
+            data: {
+                nsamples,
+                course,
+                racedef: payload.racedef,
+                uma1: payload.uma1,
+                uma2: payload.uma2,
+                options: {
+                    seed: payload.seed || 0,
+                    usePosKeep: !!payload.usePosKeep,
+                    useIntChecks: !!payload.useIntChecks,
+                },
+            },
+        });
+    });
+    worker.terminate();
+
+    if (!compareResult || checkId !== statsUmalatorCheckId) {
+        updateStatsUmalatorResults({ withSkills: '--', base: '--', draw: '--' }, { loading: false });
+        return;
+    }
+
+    const summary = summarizeCompareResults(compareResult.results || []);
+    if (!summary) {
+        updateStatsUmalatorResults({ withSkills: '--', base: '--', draw: '--' }, { loading: false });
+        return;
+    }
+
+    updateStatsUmalatorResults(summary, { loading: false });
+}
 async function openUmalator(item) {
     if (!item?.course_set || !lastState) {
-        window.open('https://alpha123.github.io/uma-tools/umalator-global/', '_blank');
+        window.open('https://kachi-dev.github.io/uma-tools/umalator-global/', '_blank');
         return;
     }
     const skillsTab = lastState.skills_tab || {};
@@ -1206,7 +2130,7 @@ async function openUmalator(item) {
     };
 
     const hash = await encodeUmalatorState(payload);
-    const baseUrl = 'https://alpha123.github.io/uma-tools/umalator-global/';
+    const baseUrl = 'https://kachi-dev.github.io/uma-tools/umalator-global/';
     if (!hash) {
         window.open(baseUrl, '_blank');
         return;
@@ -1344,7 +2268,7 @@ async function openVeteranUmalator() {
         uma2,
     } : { uma1, uma2 };
     const hash = await encodeUmalatorState(payload);
-    const baseUrl = 'https://alpha123.github.io/uma-tools/umalator-global/';
+    const baseUrl = 'https://kachi-dev.github.io/uma-tools/umalator-global/';
     if (!hash) {
         window.open(baseUrl, '_blank');
         return;
@@ -1688,36 +2612,6 @@ function updateMiscTab(state) {
     }
 }
 
-function rankBadgeDataUri(label) {
-    const colors = {
-        "G": "#6b7280",
-        "G+": "#64748b",
-        "F": "#94a3b8",
-        "F+": "#a8b2c0",
-        "E": "#60a5fa",
-        "E+": "#3b82f6",
-        "D": "#34d399",
-        "D+": "#10b981",
-        "C": "#fbbf24",
-        "C+": "#f59e0b",
-        "B": "#f97316",
-        "B+": "#ea580c",
-        "A": "#ef4444",
-        "A+": "#dc2626",
-        "S": "#a855f7",
-        "SS": "#7c3aed",
-    };
-    const text = String(label || "?");
-    const bg = colors[text] || "#6b7280";
-    const svg = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="48" height="22">
-            <rect x="1" y="1" width="46" height="20" rx="10" fill="${bg}" stroke="rgba(255,255,255,0.6)" stroke-width="1"/>
-            <text x="24" y="15" text-anchor="middle" font-size="11" fill="#fff" font-weight="700"
-                font-family="'Noto Sans JP', 'Segoe UI', sans-serif">${text}</text>
-        </svg>`;
-    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
 const HORSE_RANK_ORDER = ["G", "G+", "F", "F+", "E", "E+", "D", "D+", "C", "C+", "B", "B+", "A", "A+", "S", "S+", "SS"];
 const STATUS_RANK_ICON_INDEX = {
     'G': 0, 'G+': 1, 'F': 2, 'F+': 3, 'E': 4, 'E+': 5,
@@ -1756,6 +2650,11 @@ let cachedVeteranUma1Data = null;
 let cachedVeteranUma2Data = null;
 let umalatorPresets = [];
 let selectedPreset = null;
+let selectedStatsPreset = null;
+let selectedStatsStyle = 'auto';
+let selectedAvailableSkills = new Set();
+let availableSkillCosts = new Map();
+let availableSkillMeta = new Map();
 const VETERAN_FILTERS_KEY = 'bifrost-veteran-filters';
 
 function updateUmalatorSlots() {
@@ -1954,8 +2853,9 @@ function restoreVeteranFilters() {
 }
 
 async function loadUmalatorPresets() {
-    const select = $('veteran-preset-select');
-    if (!select) return;
+    const veteranSelect = $('veteran-preset-select');
+    const statsSelect = $('stats-preset-select');
+    if (!veteranSelect && !statsSelect) return;
     try {
         const res = await fetch('/api/umalator-presets');
         const data = await res.json();
@@ -1964,24 +2864,27 @@ async function loadUmalatorPresets() {
         umalatorPresets = [];
     }
 
-    select.innerHTML = '';
-    if (!umalatorPresets.length) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = 'No presets available';
-        select.appendChild(option);
-        selectedPreset = null;
-        return;
-    }
-
-    for (const preset of umalatorPresets) {
-        const option = document.createElement('option');
-        option.value = String(preset.courseId || '');
-        const meters = preset.distance_m ? `${preset.distance_m}m` : 'Unknown';
-        const surface = preset.is_dirt === true ? 'Dirt' : 'Turf';
-        option.textContent = `${preset.name || `Preset ${preset.courseId}`} (${surface} ${meters})`;
-        select.appendChild(option);
-    }
+    const fillSelect = (selectEl) => {
+        if (!selectEl) return;
+        selectEl.innerHTML = '';
+        if (!umalatorPresets.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No presets available';
+            selectEl.appendChild(option);
+            return;
+        }
+        for (const preset of umalatorPresets) {
+            const option = document.createElement('option');
+            option.value = String(preset.courseId || '');
+            const meters = preset.distance_m ? `${preset.distance_m}m` : 'Unknown';
+            const surface = preset.is_dirt === true ? 'Dirt' : 'Turf';
+            option.textContent = `${preset.name || `Preset ${preset.courseId}`} (${surface} ${meters})`;
+            selectEl.appendChild(option);
+        }
+    };
+    fillSelect(veteranSelect);
+    fillSelect(statsSelect);
 
     const saved = (() => {
         try {
@@ -1991,14 +2894,30 @@ async function loadUmalatorPresets() {
         }
     })();
     const savedPreset = saved.preset ? String(saved.preset) : '';
-    if (savedPreset && umalatorPresets.find(p => String(p.courseId) === savedPreset)) {
-        select.value = savedPreset;
+    if (veteranSelect) {
+        if (savedPreset && umalatorPresets.find(p => String(p.courseId) === savedPreset)) {
+            veteranSelect.value = savedPreset;
+        }
+        if (veteranSelect.value) {
+            selectedPreset = umalatorPresets.find(p => String(p.courseId) === veteranSelect.value) || umalatorPresets[0];
+        } else {
+            selectedPreset = umalatorPresets[0];
+            veteranSelect.value = String(selectedPreset.courseId || '');
+        }
+        veteranSelect.addEventListener('change', () => {
+            selectedPreset = umalatorPresets.find(p => String(p.courseId) === String(veteranSelect.value)) || umalatorPresets[0];
+            saveVeteranFilters();
+        });
     }
-    if (select.value) {
-        selectedPreset = umalatorPresets.find(p => String(p.courseId) === select.value) || umalatorPresets[0];
-    } else {
-        selectedPreset = umalatorPresets[0];
-        select.value = String(selectedPreset.courseId || '');
+    if (statsSelect) {
+        const defaultPreset = findStatsDefaultPreset();
+        selectedStatsPreset = defaultPreset || umalatorPresets[0] || null;
+        if (selectedStatsPreset) {
+            statsSelect.value = String(selectedStatsPreset.courseId || '');
+        }
+        statsSelect.addEventListener('change', () => {
+            selectedStatsPreset = umalatorPresets.find(p => String(p.courseId) === String(statsSelect.value)) || umalatorPresets[0] || null;
+        });
     }
 }
 

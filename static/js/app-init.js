@@ -28,6 +28,12 @@ document.querySelectorAll('.tab').forEach(tab => {
         if (tab.dataset.tab.startsWith('veteran')) {
             loadVeteran();
         }
+        if (tab.dataset.tab === 'stats') {
+            const select = $('stats-preset-select');
+            if (select && select.options.length && select.options[0].textContent === 'Loading presets...') {
+                loadUmalatorPresets();
+            }
+        }
     });
 });
 
@@ -107,3 +113,17 @@ $('veteran-preset-select')?.addEventListener('change', (event) => {
 
 
 connect();
+loadUmalatorPresets();
+const savedStyle = localStorage.getItem('bifrost-stats-style') || 'auto';
+if (typeof selectedStatsStyle !== 'undefined') {
+    selectedStatsStyle = savedStyle;
+}
+const styleSelect = $('stats-style-select');
+if (styleSelect) {
+    styleSelect.value = savedStyle;
+    styleSelect.addEventListener('change', (event) => {
+        const value = event.target.value || 'auto';
+        selectedStatsStyle = value;
+        localStorage.setItem('bifrost-stats-style', value);
+    });
+}
