@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "web_port": 8080,
     "max_buffer_size": 262144,
     "log_level": "INFO",
+    "preset_source": "global",
     "calculator": {
         "enabled": True,
         "weights": {

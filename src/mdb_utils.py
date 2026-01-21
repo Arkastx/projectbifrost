@@ -39,6 +39,7 @@ _card_text_dict: Dict[int, dict] = {}
 _dress_title_dict: Dict[int, str] = {}
 _program_info_dict: Dict[int, dict] = {}
 _track_name_dict: Dict[int, str] = {}
+_track_name_norm_dict: Dict[str, int] = {}
 _route_objectives_dict: Dict[int, list] = {}
 _succession_factor_dict: Dict[int, dict] = {}
 _course_set_dict: Dict[int, dict] = {}
@@ -314,6 +315,29 @@ def _load_program_info() -> None:
             }
 
 
+def _load_track_names() -> None:
+    if _track_name_dict:
+        return
+    with _connect() as con:
+        cur = con.cursor()
+        cur.execute("""SELECT "index", text FROM text_data WHERE category = 31""")
+        for track_id, name in cur.fetchall():
+            _track_name_dict[int(track_id)] = name
+            normalized = _normalize_track_name(name)
+            if normalized:
+                _track_name_norm_dict[normalized] = int(track_id)
+
+
+def _normalize_track_name(name: str) -> str:
+    value = name.lower().strip()
+    for suffix in ("racecourse", "race course", "racetrack", "race track"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].strip()
+    value = value.replace(".", "").replace("-", " ").strip()
+    value = " ".join(value.split())
+    return value
+
+
 def _load_succession_factors() -> None:
     if _succession_factor_dict:
         return
@@ -504,6 +528,19 @@ def get_succession_factor(factor_id: int) -> Optional[dict]:
 def get_course_set_info(course_set_id: int) -> Optional[dict]:
     _load_course_sets()
     return _course_set_dict.get(course_set_id)
+
+
+def get_race_track_id_by_name(name: str) -> Optional[int]:
+    if not name:
+        return None
+    _load_track_names()
+    normalized = _normalize_track_name(name)
+    if normalized in _track_name_norm_dict:
+        return _track_name_norm_dict[normalized]
+    for key, track_id in _track_name_norm_dict.items():
+        if key and key in normalized:
+            return track_id
+    return None
 
 
 def get_available_skill_set_id(card_id: int) -> Optional[int]:

@@ -2,6 +2,8 @@
 import asyncio
 import json
 import re
+from datetime import datetime
+from html import unescape
 from urllib.request import urlopen, Request
 from pathlib import Path
 from typing import Set
@@ -105,7 +107,7 @@ async def get_settings():
 async def post_settings(payload: dict):
     """Save settings."""
     cfg = load_config()
-    for key in ("udp_host", "udp_port", "web_host", "web_port", "max_buffer_size", "log_level", "calculator"):
+    for key in ("udp_host", "udp_port", "web_host", "web_port", "max_buffer_size", "log_level", "calculator", "preset_source"):
         if key in payload:
             cfg[key] = payload[key]
     save_config(cfg)
@@ -138,6 +140,8 @@ async def reset_state():
 @app.get("/api/umalator-presets")
 async def get_umalator_presets():
     """Fetch Umalator preset list from bundle.js (alpha123 or GitHub fallback)."""
+    cfg = load_config()
+    preset_source = cfg.get("preset_source", "global")
     urls = [
         "https://alpha123.github.io/uma-tools/umalator-global/bundle.js",
         "https://raw.githubusercontent.com/alpha123/uma-tools/master/umalator-global/bundle.js",
@@ -147,8 +151,50 @@ async def get_umalator_presets():
         "https://raw.githubusercontent.com/alpha123/uma-tools/master/umalator-global/course_data.json",
     ]
 
+    def _load_course_data() -> dict:
+        headers = {"User-Agent": "ProjectBifrost/0.1"}
+        for url in course_urls:
+            try:
+                req = Request(url, headers=headers)
+                data = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
+                if data:
+                    return data
+            except Exception as e:
+                logger.error(f"Failed to fetch course data from {url}: {e}")
+                continue
+        try:
+            local_path = STATIC_DIR / "umalator" / "course_data.json"
+            if local_path.exists():
+                return json.loads(local_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to read local course data: {e}")
+        return {}
+
     def _extract_presets(text: str) -> list:
         start = text.find("var ci=")
+        if start == -1:
+            markers = [
+                "Capricorn Cup",
+                "Sagittarius Cup",
+                "Scorpio Cup",
+                "Libra Cup",
+                "Virgo Cup",
+                "Leo Cup",
+                "Cancer Cup",
+                "Gemini Cup",
+                "Taurus Cup",
+            ]
+            marker_positions = []
+            for marker in markers:
+                pos = text.find(marker)
+                if pos != -1:
+                    marker_positions.append(pos)
+            marker_pos = min(marker_positions) if marker_positions else -1
+            if marker_pos != -1:
+                pattern = re.compile(r"(?:var|let|const)\s+[A-Za-z_$][\w$]*\s*=\s*\[")
+                matches = list(pattern.finditer(text[:marker_pos]))
+                if matches:
+                    start = matches[-1].start()
         if start == -1:
             return []
         start = text.find("[", start)
@@ -172,26 +218,240 @@ async def get_umalator_presets():
         raw = re.sub(r",\\s*]", "]", raw)
         return json.loads(raw)
 
-    headers = {"User-Agent": "ProjectBifrost/0.1"}
-    course_data = {}
-    for url in course_urls:
+    def _fetch_jp_cm_presets(course_data: dict) -> list:
+        url = "https://gametora.com/umamusume/events/champions-meeting"
         try:
-            req = Request(url, headers=headers)
-            course_data = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
-            if course_data:
-                break
+            req = Request(url, headers={"User-Agent": "ProjectBifrost/0.1"})
+            html_text = urlopen(req, timeout=15).read().decode("utf-8")
         except Exception as e:
-            logger.error(f"Failed to fetch course data from {url}: {e}")
-            continue
+            logger.error(f"Failed to fetch JP CM list from {url}: {e}")
+            return []
+
+        section_marker = "Champions Meeting History (Japanese server)"
+        marker_idx = html_text.find(section_marker)
+        if marker_idx == -1:
+            return []
+        snippet = html_text[marker_idx:]
+        snippet = unescape(snippet)
+        snippet = re.sub(r"<!--.*?-->", "", snippet, flags=re.DOTALL)
+        snippet = snippet.replace("\n", " ").replace("\xa0", " ")
+
+        dash = r"[\\u2013\\u2014-]"
+        pattern = re.compile(
+            r"<div[^>]*>\\s*<div><b>(?P<name>[^<]+)</b></div>\\s*"
+            rf"<div[^>]*>\\s*<span>(?P<start>[^<]+)</span>\\s*{dash}\\s*<span>(?P<end>[^<]+)</span>\\s*</div>\\s*"
+            rf"<div>(?P<track>[^<]+)\\s*{dash}\\s*(?P<surface>[^<]+)</div>\\s*"
+            rf"<div>(?P<distance>\\d+)\\s*m\\s*{dash}\\s*(?P<distance_type>[^<]+)\\s*{dash}\\s*(?P<turn>[^<]+)</div>\\s*"
+            rf"<div>(?P<ground>[^<]+)\\s*{dash}\\s*(?P<season>[^<]+)\\s*{dash}\\s*(?P<weather>[^<]+)</div>",
+            flags=re.IGNORECASE,
+        )
+
+        surface_map = {"turf": 1, "dirt": 2}
+        ground_map = {"firm": 1, "good": 2, "soft": 3, "heavy": 4}
+        season_map = {"spring": 1, "summer": 2, "autumn": 3, "fall": 3, "winter": 4}
+        weather_map = {"sunny": 1, "cloudy": 2, "rainy": 3, "snowy": 4}
+        turn_map = {"clockwise": 1, "counterclockwise": 2}
+        track_fallback = {
+            "sapporo": 10001,
+            "hakodate": 10002,
+            "niigata": 10003,
+            "fukushima": 10004,
+            "nakayama": 10005,
+            "tokyo": 10006,
+            "chukyo": 10007,
+            "kyoto": 10008,
+            "hanshin": 10009,
+            "kokura": 10010,
+            "oi": 10101,
+            "ooi": 10101,
+        }
+
+        presets = []
+        for match in pattern.finditer(snippet):
+            name = match.group("name").strip()
+            track_name = match.group("track").strip()
+            surface_label = match.group("surface").strip().lower()
+            distance_m = int(match.group("distance"))
+            ground_label = match.group("ground").strip().lower()
+            season_label = match.group("season").strip().lower()
+            weather_label = match.group("weather").strip().lower()
+            turn_label = match.group("turn").strip().lower()
+
+            surface = surface_map.get(surface_label)
+            if surface is None:
+                continue
+            race_track_id = mdb_utils.get_race_track_id_by_name(track_name)
+            if race_track_id is None:
+                race_track_id = track_fallback.get(track_name.lower())
+            if race_track_id is None:
+                continue
+
+            turn_value = turn_map.get(turn_label)
+            course_id = None
+            for cid, info in course_data.items():
+                if info.get("raceTrackId") != race_track_id:
+                    continue
+                if info.get("distance") != distance_m:
+                    continue
+                if info.get("surface") != surface:
+                    continue
+                if turn_value is not None and info.get("turn") != turn_value:
+                    continue
+                course_id = int(cid)
+                break
+
+            if course_id is None:
+                for cid, info in course_data.items():
+                    if info.get("raceTrackId") == race_track_id and info.get("distance") == distance_m and info.get("surface") == surface:
+                        course_id = int(cid)
+                        break
+
+            if course_id is None:
+                continue
+
+            presets.append({
+                "name": name,
+                "courseId": course_id,
+                "date": match.group("start").strip(),
+                "season": season_map.get(season_label),
+                "ground": ground_map.get(ground_label),
+                "weather": weather_map.get(weather_label),
+                "time": 2,
+                "distance_m": distance_m,
+                "is_dirt": surface == 2,
+                "season_label": match.group("season").strip(),
+                "weather_label": match.group("weather").strip(),
+                "time_label": "Night",
+                "condition_label": match.group("ground").strip(),
+            })
+
+        return presets
+
+    def _build_static_jp_presets(course_data: dict) -> list:
+        if not course_data:
+            try:
+                local_path = STATIC_DIR / "umalator" / "course_data.json"
+                if local_path.exists():
+                    course_data = json.loads(local_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.error(f"Failed to read local course data for JP presets: {e}")
+        fallback_course_ids = {
+            ("tokyo", "turf", 2400, "counterclockwise"): 10606,
+            ("kyoto", "turf", 3200, "clockwise"): 10811,
+            ("tokyo", "turf", 1600, "counterclockwise"): 10602,
+            ("hanshin", "turf", 2200, "clockwise"): 10906,
+            ("hanshin", "turf", 1600, "clockwise"): 10903,
+            ("kyoto", "turf", 3000, "clockwise"): 10810,
+            ("tokyo", "turf", 2000, "counterclockwise"): 10604,
+            ("nakayama", "turf", 2500, "clockwise"): 10506,
+            ("chukyo", "turf", 1200, "counterclockwise"): 10701,
+            ("tokyo", "dirt", 1600, "counterclockwise"): 10611,
+            ("hanshin", "turf", 3200, "clockwise"): 10914,
+            ("nakayama", "turf", 2000, "clockwise"): 10504,
+            ("nakayama", "turf", 1200, "clockwise"): 10501,
+            ("ooi", "dirt", 2000, "clockwise"): 11103,
+            ("kyoto", "turf", 2200, "clockwise"): 10808,
+            ("hanshin", "turf", 1400, "clockwise"): 10902,
+        }
+        entries = [
+            ("Taurus Cup", "13 May 2021, 23:00", "Tokyo", "Turf", 2400, "Counterclockwise", "Firm", "Spring", "Sunny"),
+            ("Gemini Cup", "13 Jun 2021, 23:00", "Kyoto", "Turf", 3200, "Clockwise", "Firm", "Spring", "Sunny"),
+            ("Cancer Cup", "22 Jul 2021, 23:00", "Tokyo", "Turf", 1600, "Counterclockwise", "Good", "Summer", "Sunny"),
+            ("Leo Cup", "23 Aug 2021, 23:00", "Hanshin", "Turf", 2200, "Clockwise", "Firm", "Summer", "Sunny"),
+            ("Virgo Cup", "20 Sept 2021, 23:00", "Hanshin", "Turf", 1600, "Clockwise", "Firm", "Autumn", "Sunny"),
+            ("Libra Cup", "21 Oct 2021, 23:00", "Kyoto", "Turf", 3000, "Clockwise", "Firm", "Autumn", "Sunny"),
+            ("Scorpio Cup", "22 Nov 2021, 22:00", "Tokyo", "Turf", 2000, "Counterclockwise", "Soft", "Autumn", "Rain"),
+            ("Sagittarius Cup", "20 Dec 2021, 22:00", "Nakayama", "Turf", 2500, "Clockwise", "Firm", "Winter", "Sunny"),
+            ("Capricorn Cup", "21 Jan 2022, 22:00", "Chukyo", "Turf", 1200, "Counterclockwise", "Soft", "Winter", "Snow"),
+            ("Aquarius Cup", "17 Feb 2022, 22:00", "Tokyo", "Dirt", 1600, "Counterclockwise", "Firm", "Winter", "Sunny"),
+            ("Pisces Cup", "21 Mar 2022, 23:00", "Hanshin", "Turf", 3200, "Clockwise", "Heavy", "Spring", "Rain"),
+            ("Aries Cup", "21 Apr 2022, 23:00", "Nakayama", "Turf", 2000, "Clockwise", "Firm", "Spring", "Sunny"),
+            ("Taurus Cup", "23 May 2022, 23:00", "Tokyo", "Turf", 2400, "Counterclockwise", "Firm", "Spring", "Sunny"),
+            ("Gemini Cup", "13 Jun 2022, 23:00", "Tokyo", "Turf", 1600, "Counterclockwise", "Firm", "Spring", "Sunny"),
+            ("Cancer Cup", "13 Jul 2022, 23:00", "Hanshin", "Turf", 2200, "Clockwise", "Good", "Summer", "Cloudy"),
+            ("Leo Cup", "12 Aug 2022, 23:00", "Nakayama", "Turf", 1200, "Clockwise", "Firm", "Summer", "Sunny"),
+            ("Virgo Cup", "14 Sept 2022, 23:00", "Ooi", "Dirt", 2000, "Clockwise", "Good", "Autumn", "Sunny"),
+            ("Libra Cup", "13 Oct 2022, 23:00", "Hanshin", "Turf", 1600, "Clockwise", "Firm", "Autumn", "Cloudy"),
+            ("Scorpio Cup", "12 Nov 2022, 22:00", "Kyoto", "Turf", 2200, "Clockwise", "Firm", "Autumn", "Sunny"),
+            ("Sagittarius Cup", "14 Dec 2022, 22:00", "Nakayama", "Turf", 2500, "Clockwise", "Good", "Winter", "Cloudy"),
+            ("Capricorn Cup", "13 Jan 2023, 22:00", "Chukyo", "Turf", 1200, "Counterclockwise", "Firm", "Winter", "Sunny"),
+            ("Aquarius Cup", "16 Feb 2023, 22:00", "Tokyo", "Dirt", 1600, "Counterclockwise", "Soft", "Winter", "Snow"),
+            ("Pisces Cup", "13 Mar 2023, 23:00", "Nakayama", "Turf", 2000, "Clockwise", "Firm", "Spring", "Sunny"),
+            ("Aries Cup", "12 Apr 2023, 23:00", "Kyoto", "Turf", 3200, "Clockwise", "Firm", "Spring", "Sunny"),
+            ("MILE", "12 Jun 2023, 23:00", "Tokyo", "Turf", 1600, "Counterclockwise", "Heavy", "Spring", "Rain"),
+            ("DIRT", "17 Aug 2023, 23:00", "Funabashi", "Dirt", 1600, "Counterclockwise", "Firm", "Summer", "Sunny"),
+            ("CLASSIC", "12 Oct 2023, 23:00", "Longchamp", "Turf", 2400, "Clockwise", "Soft", "Autumn", "Rain"),
+            ("LONG", "13 Dec 2023, 22:00", "Nakayama", "Turf", 2500, "Clockwise", "Soft", "Winter", "Snow"),
+            ("SPRINT", "17 Feb 2024, 22:00", "Hanshin", "Turf", 1400, "Clockwise", "Good", "Winter", "Cloudy"),
+            ("MILE", "12 Apr 2024, 23:00", "Hanshin", "Turf", 1600, "Clockwise", "Firm", "Spring", "Sunny"),
+        ]
+
+        surface_map = {"turf": 1, "dirt": 2}
+        ground_map = {"firm": 1, "good": 2, "soft": 3, "heavy": 4}
+        season_map = {"spring": 1, "summer": 2, "autumn": 3, "fall": 3, "winter": 4}
+        weather_map = {"sunny": 1, "cloudy": 2, "rain": 3, "rainy": 3, "snow": 4, "snowy": 4}
+
+        presets = []
+        for name, date_line, track_name, surface_label, distance_m, turn_label, ground_label, season_label, weather_label in entries:
+            surface_label = surface_label.strip().lower()
+            turn_label = turn_label.strip().lower()
+            ground_label = ground_label.strip().lower()
+            season_label = season_label.strip().lower()
+            weather_label = weather_label.strip().lower()
+            surface = surface_map.get(surface_label)
+            if surface is None:
+                continue
+
+            course_id = fallback_course_ids.get((track_name.lower(), surface_label, distance_m, turn_label))
+            if course_id is None:
+                logger.warning(f"JP preset skipped: missing course for {track_name} {distance_m} {surface_label}")
+                continue
+
+            start_dt = None
+            try:
+                start_dt = datetime.strptime(date_line, "%d %b %Y, %H:%M")
+            except ValueError:
+                start_dt = None
+
+            presets.append({
+                "name": name,
+                "courseId": course_id,
+                "date": date_line,
+                "season": season_map.get(season_label),
+                "ground": ground_map.get(ground_label),
+                "weather": weather_map.get(weather_label),
+                "time": 2,
+                "distance_m": distance_m,
+                "is_dirt": surface == 2,
+                "season_label": season_label.title(),
+                "weather_label": weather_label.title(),
+                "time_label": "Night",
+                "condition_label": ground_label.title(),
+                "_start_dt": start_dt,
+            })
+
+        if not presets:
+            logger.error("JP preset list parsed to 0 entries.")
+        presets.sort(key=lambda item: item.get("_start_dt") or datetime.min, reverse=True)
+        for item in presets:
+            item.pop("_start_dt", None)
+        return presets
+    course_data = _load_course_data()
+
+    if preset_source == "jp":
+        presets = _build_static_jp_presets(course_data)
+        logger.info(f"JP preset source selected: {len(presets)} presets")
+        return {"presets": presets}
 
     for url in urls:
         try:
-            req = Request(url, headers=headers)
+            req = Request(url, headers={"User-Agent": "ProjectBifrost/0.1"})
             text = urlopen(req, timeout=10).read().decode("utf-8")
             presets = _extract_presets(text)
             if presets:
                 enriched = []
-                for preset in presets:
+                total = len(presets)
+                for index, preset in enumerate(presets):
                     course_id = preset.get("courseId")
                     course_info = course_data.get(str(course_id)) if course_id is not None else None
                     distance_m = None
@@ -215,6 +475,7 @@ async def get_umalator_presets():
                         1: "Cloudy",
                         2: "Rainy",
                         3: "Snowy",
+                        4: "Snowy",
                     }
                     time_map = {
                         0: "Daytime",
@@ -246,6 +507,10 @@ async def get_umalator_presets():
         except Exception as e:
             logger.error(f"Failed to fetch Umalator presets from {url}: {e}")
             continue
+    if preset_source == "auto":
+        presets = _build_static_jp_presets(course_data)
+        logger.info(f"Auto preset fallback selected: {len(presets)} presets")
+        return {"presets": presets}
     return {"presets": []}
 
 

@@ -97,6 +97,9 @@ async function loadSettings() {
         $('setting-web-port').value = cfg.web_port || 8080;
         $('setting-max-buffer').value = cfg.max_buffer_size || 262144;
         $('setting-log-level').value = cfg.log_level || 'INFO';
+        const presetSource = cfg.preset_source || 'global';
+        const presetSourceEl = $('setting-preset-source');
+        if (presetSourceEl) presetSourceEl.value = presetSource;
         const calc = cfg.calculator || {};
         const weights = calc.weights || {};
         const thresholds = calc.thresholds || {};
@@ -146,14 +149,15 @@ async function saveSettings() {
         return Number.isFinite(value) ? value : fallback;
     };
 
-    const payload = {
-        udp_host: $('setting-udp-host').value || '127.0.0.1',
-        udp_port: Number($('setting-udp-port').value) || 17229,
-        web_host: $('setting-web-host').value || '127.0.0.1',
-        web_port: Number($('setting-web-port').value) || 8080,
-        max_buffer_size: Number($('setting-max-buffer').value) || 262144,
-        log_level: $('setting-log-level').value || 'INFO',
-        calculator: {
+        const payload = {
+            udp_host: $('setting-udp-host').value || '127.0.0.1',
+            udp_port: Number($('setting-udp-port').value) || 17229,
+            web_host: $('setting-web-host').value || '127.0.0.1',
+            web_port: Number($('setting-web-port').value) || 8080,
+            max_buffer_size: Number($('setting-max-buffer').value) || 262144,
+            log_level: $('setting-log-level').value || 'INFO',
+            preset_source: $('setting-preset-source')?.value || 'global',
+            calculator: {
             enabled: $('setting-calc-enabled').value !== 'off',
             weights: {
                 speed: numOr('setting-calc-weight-speed', DEFAULT_CALCULATOR.weights.speed),
@@ -194,6 +198,11 @@ async function saveSettings() {
                 ...payload.calculator.thresholds
             }
         };
+        try {
+            await loadUmalatorPresets();
+        } catch (e) {
+            // Ignore preset refresh errors; settings are already saved.
+        }
         if (status) status.textContent = 'Saved';
     } catch (e) {
         if (status) status.textContent = 'Save failed';
@@ -2874,12 +2883,17 @@ async function loadUmalatorPresets() {
             selectEl.appendChild(option);
             return;
         }
-        for (const preset of umalatorPresets) {
+        for (let i = 0; i < umalatorPresets.length; i += 1) {
+            const preset = umalatorPresets[i];
             const option = document.createElement('option');
             option.value = String(preset.courseId || '');
             const meters = preset.distance_m ? `${preset.distance_m}m` : 'Unknown';
             const surface = preset.is_dirt === true ? 'Dirt' : 'Turf';
-            option.textContent = `${preset.name || `Preset ${preset.courseId}`} (${surface} ${meters})`;
+            const rawName = preset.name || `Preset ${preset.courseId}`;
+            const cmIndex = umalatorPresets.length - i;
+            const hasCmPrefix = /^CM\d+\s/i.test(rawName);
+            const displayName = hasCmPrefix ? rawName : `CM${cmIndex} ${rawName}`;
+            option.textContent = `${displayName} (${surface} ${meters})`;
             selectEl.appendChild(option);
         }
     };
